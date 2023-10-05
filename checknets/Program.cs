@@ -7,6 +7,21 @@ using System.Runtime.InteropServices;
 using Microsoft.Data.Sqlite;
 using System.Data.SqlClient;
 using System.ComponentModel.DataAnnotations;
+using System.Reflection;
+using System.Configuration;
+using System.Net;
+
+
+var appSettings = ConfigurationManager.AppSettings;
+var po_user = appSettings["po_user"];
+var po_token = appSettings["po_token"];
+var str_run_lim = appSettings["run_lim"];
+int run_lim = 5;
+if (str_run_lim != null) {
+    run_lim = int.Parse(str_run_lim);    
+}
+bool db_ready = false;
+bool first_run = false;
 
 static TcpConnectionInformation[] GetConnections() {
     IPGlobalProperties igp = IPGlobalProperties.GetIPGlobalProperties();
@@ -14,9 +29,22 @@ static TcpConnectionInformation[] GetConnections() {
     return connections;
 }
 
+static int SendNotification(string Title, string Message, string ?User, string ?Token) {
+    if(User == null || Token == null) return -1;
 
+    var url = $"https://api.pushover.net/1/messages.json?user={User}&token={Token}&title={Title}&message={Message}";
 
-bool db_ready = false;
+    HttpClient client = new HttpClient();
+    HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, url);
+    HttpResponseMessage resp = client.Send(req);
+    if (resp.IsSuccessStatusCode) {
+        return 0;
+    } else {
+        return -2;
+    }
+    
+}
+
 
 using (var connection = new SqliteConnection("Data Source=connections.db")) {
 
@@ -41,6 +69,7 @@ using (var connection = new SqliteConnection("Data Source=connections.db")) {
     }
 
     if (try_db_setup) {
+        first_run = true;
         try {
             var cmd = connection.CreateCommand();
             cmd.CommandText =
@@ -85,9 +114,9 @@ if (connections == null) {
     Environment.Exit(2);
 }
 
-string recorded = System.DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+string recorded = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
 string hostname = Environment.MachineName.ToUpper();
-int run_lim = 5;
+
 List<System.Net.IPAddress> newobs = new List<System.Net.IPAddress>();
 
 //run checks 
@@ -105,8 +134,10 @@ using (var dbconn = new SqliteConnection("Data Source=connections.db")) {
         SqliteDataReader reader = dbcmd.ExecuteReader();
         reader.Read();       
         
-        if(reader[0].ToString() == "0") { //never seen
-            Console.WriteLine($"[*] We never saw {conn.RemoteEndPoint.Address}");
+        if(reader[0].ToString() == "0" && !first_run) { //never seen
+            string remoteaddress = conn.RemoteEndPoint.Address.ToString().Replace(".", "[.]");
+            Console.WriteLine($"  [*] new: {conn.RemoteEndPoint.Address}");
+            SendNotification($"New Connection on {hostname}", $"[{recorded}] : Remote IP: {remoteaddress}:{conn.RemoteEndPoint.Port}", po_user, po_token);
             newobs.Add(conn.RemoteEndPoint.Address);
         }
     }
@@ -192,21 +223,33 @@ using (var dbconn = new SqliteConnection("Data Source=connections.db")) {
     runcount.CommandText = "SELECT COUNT(DISTINCT Recorded) AS DC FROM CONNECTIONS";
     SqliteDataReader reader = runcount.ExecuteReader();
     reader.Read();
-    if (int.Parse(reader[0].ToString()) > run_lim) {
+    var numrows = int.Parse(reader[0].ToString());
+    if (numrows > run_lim) {
+        var num_to_delete = numrows - run_lim;
+
         SqliteCommand get_recs = dbconn.CreateCommand();
         get_recs.CommandText = "SELECT DISTINCT Recorded FROM CONNECTIONS ORDER BY RECORDED";
         SqliteDataReader results = get_recs.ExecuteReader();
-        results.Read();
-        string rtd = results[0].ToString();
-        // todo: handle when number of runs is greater than limit by 2 or more 
-        SqliteCommand del_old = dbconn.CreateCommand();
-        del_old.CommandText = "DELETE FROM CONNECTIONS WHERE Recorded = $r";
+        
+        for(int i=0;i<num_to_delete;i++) {
+            results.Read();
+            string rtd = results[0].ToString();
+            
+            SqliteCommand del_old = dbconn.CreateCommand();
+            del_old.CommandText = "DELETE FROM CONNECTIONS WHERE Recorded = $r";
+            
+            SqliteParameter rdel = del_old.CreateParameter();
+            rdel.ParameterName = "$r";
+            rdel.Value = rtd;
+            del_old.Parameters.Add(rdel);
 
-        SqliteParameter rdel = del_old.CreateParameter();
-        rdel.ParameterName = "$r";
-        rdel.Value = rtd;
-        del_old.Parameters.Add(rdel);
-        del_old.ExecuteNonQuery();
+            del_old.ExecuteNonQuery();
+        }
+        
+        
+        
+
+        
     }
 }
 
